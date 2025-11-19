@@ -195,10 +195,10 @@ class Environment:
                     ch = 'P'
                 elif c in self.walls:
                     ch = '#'
-                elif c in self.pellets:
-                    ch = '.'
                 elif c in ghost_positions and c != self.pacman_pos:
                     ch = 'G'
+                elif c in self.pellets:
+                    ch = '.'
                 else:
                     ch = ' '
 
@@ -225,6 +225,7 @@ class Ghost:
         # drop any transient sensors if you want; here we remember seen pacman cells
             px, py = env.pacman_pos
             gx, gy = self.pos
+
 
             if abs(px - gx) + abs(py - gy) <= self.sight:
                 atom = f"Seen_{px}_{py}"
