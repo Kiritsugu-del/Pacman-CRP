@@ -117,6 +117,7 @@ class Environment:
         self.time: int = 0
         self.finished: bool = False
         self.ghosts: List['Ghost'] = []  
+        self.score = 0
 
 
     def in_bounds(self, c: Coord) -> bool:
@@ -152,6 +153,10 @@ class Environment:
             nx, ny = self.pacman_pos[0] + dx, self.pacman_pos[1] + dy
             if not self.blocked((nx, ny)):
                 self.pacman_pos = (nx, ny)
+        
+        if self.pacman_pos in self.pellets:
+            self.pellets.remove(self.pacman_pos)
+            self.score += 10
 
         # Collect pellet if needed
         if self.pacman_pos in self.pellets:
@@ -182,7 +187,7 @@ class Environment:
             'G' - Ghost
         """
         buf: List[str] = []
-        status_line = f"t={self.time} | pellets={len(self.pellets)}"
+        status_line = f"t={self.time} | pellets={len(self.pellets)} | score={self.score}"
         buf.append(status_line)
 
         ghost_positions = {g.pos for g in self.ghosts}
@@ -342,6 +347,7 @@ def run_game(
 
 def run_pacman():
     """Game entry point: create a maze, instantiate the environment, run the game."""
+    
     width, height = 20, 20 
     walls, pellets, pacman_start, ghost1_start = generate_maze(w=width, h=height)
 
