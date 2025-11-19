@@ -187,7 +187,7 @@ class Environment:
             'G' - Ghost
         """
         buf: List[str] = []
-        status_line = f"t={self.time} | pellets={len(self.pellets)} | score={self.score}"
+        status_line = f"t={self.time} | pellets={len(self.pellets)} | scoreu={self.score}"
         buf.append(status_line)
 
         ghost_positions = {g.pos for g in self.ghosts}
@@ -196,7 +196,9 @@ class Environment:
             row = []
             for x in range(self.w):
                 c = (x, y)
-                if c == self.pacman_pos:
+                if c in ghost_positions:
+                    ch = 'G'
+                elif c == self.pacman_pos and c not in ghost_positions:
                     ch = 'P'
                 elif c in self.walls:
                     ch = '#'
