@@ -108,16 +108,20 @@ class Environment:
         walls: Set[Coord] = None,
         pellets: Set[Coord] = None,
         start_pos: Coord = (0, 0),
+        lives: int = 3
 
     ):
+        
         self.w, self.h = w, h
         self.walls: Set[Coord] = set(walls or set())
         self.pellets: Set[Coord] = set(pellets or set())
         self.pacman_pos: Coord = start_pos
+        self.start_pos: Coord = start_pos  
         self.time: int = 0
         self.finished: bool = False
-        self.ghosts: List['Ghost'] = []  
+        self.ghosts: List['Ghost1','Ghost2'] = []  
         self.score = 0
+        self.lives=lives
 
 
     def in_bounds(self, c: Coord) -> bool:
@@ -166,11 +170,15 @@ class Environment:
             ghost.perceive_and_update_kb(self)
             ghost.next_action(self)
 
-        # Check collision with ghosts
-        for ghost in self.ghosts:
-            if ghost.pos == self.pacman_pos:
+        if any(ghost.pos == self.pacman_pos for ghost in self.ghosts):
+            if self.lives <= 0:
                 self.finished = True
-                break
+            else:
+                self.pacman_pos = self.start_pos
+                self.lives -= 1
+                for ghost in self.ghosts:
+                    ghost.pos = ghost.start
+
 
         # Check if no pellets are left
         if len(self.pellets) == 0:
@@ -187,17 +195,17 @@ class Environment:
             'G' - Ghost
         """
         buf: List[str] = []
-        status_line = f"t={self.time} | pellets={len(self.pellets)} | scoreu={self.score}"
+        status_line = f"t={self.time} | pellets={len(self.pellets)} | score={self.score} | lives = {self.lives}"
         buf.append(status_line)
 
-        ghost_positions = {g.pos for g in self.ghosts}
-
+        ghost_positions = {g.pos: i for i, g in enumerate(self.ghosts)}
         for y in range(self.h):
             row = []
             for x in range(self.w):
                 c = (x, y)
                 if c in ghost_positions:
-                    ch = 'G'
+                    #ch = 'G'
+                    ch = str(ghost_positions[c] + 1)  
                 elif c == self.pacman_pos and c not in ghost_positions:
                     ch = 'P'
                 elif c in self.walls:
@@ -218,7 +226,7 @@ class Environment:
         return '\n'.join(buf)
 
 
-class Ghost:
+class Ghost1:
 
     Coord = Tuple[int,int]
 
@@ -226,6 +234,7 @@ class Ghost:
         self.pos = start
         self.sight = sight
         self.kb = KB()
+        self.start = start
 
      
     def perceive_and_update_kb(self, env) -> None:
@@ -249,6 +258,16 @@ class Ghost:
                 nx, ny = gx+dx, gy+dy
                 if env.blocked((nx, ny)):
                     self.kb.add_fact(f"Wall_{nx}_{ny}")
+            
+            for other_ghost in env.ghosts:
+                if other_ghost != self:  # Don't check self
+                    for fact in other_ghost.kb.facts:
+                        if fact.startswith("Target_"):
+                            # Adopt the target's rule if not already known
+                            if fact not in self.kb.facts:
+                                self.kb.add_fact(fact)
+                                self.kb.add_rule(fact, [fact.split(" :- ")[0]])  # Simple adoption
+                        
             self.kb.infer_all()
 
     def next_action(self, env) -> str:
@@ -291,6 +310,108 @@ class Ghost:
                     self.pos = (nx, ny)
                     return name
             return 'WAIT'
+    
+class Ghost2:
+
+    Coord = Tuple[int,int]
+
+    def __init__(self,start: Coord, sight: int = 4):
+        self.pos = start
+        self.sight = sight
+        self.kb = KB()
+        self.start = start
+
+     
+    def perceive_and_update_kb(self, env) -> None:
+        # drop any transient sensors if you want; here we remember seen pacman cells
+            px, py = env.pacman_pos
+            gx, gy = self.pos
+
+
+            if abs(px - gx) + abs(py - gy) <= self.sight:
+                atom = f"Seen_{px}_{py}"
+                self.kb.add_fact(atom)
+                # keep a rule that maps Seen -> Target (simple memory)
+                self.kb.add_rule(f"Target_{px}_{py}", [atom])
+
+            # always record our current position atom (optional)
+            self.kb.add_fact(f"Ghost_{gx}_{gy}")
+
+            # record local walls so the ghost avoids them
+            moves = {'UP': (0,-1),'DOWN':(0,1),'LEFT':(-1,0),'RIGHT':(1,0)}
+            for d,(dx,dy) in moves.items():
+                nx, ny = gx+dx, gy+dy
+                if env.blocked((nx, ny)):
+                    self.kb.add_fact(f"Wall_{nx}_{ny}")
+
+            for other_ghost in env.ghosts:
+                if other_ghost != self: 
+                    for fact in other_ghost.kb.facts:
+                        if fact.startswith("Target_"):
+                            if fact not in self.kb.facts:
+                                self.kb.add_fact(fact)
+                                self.kb.add_rule(fact, [fact.split(" :- ")[0]])  #
+
+            self.kb.infer_all()
+
+    def next_action(self, env) -> str:
+            gx, gy = self.pos
+            # 1) if pacman adjacent -> chase (deterministic)
+            for dir_name, (dx,dy) in {'LEFT':(-1,0),'RIGHT':(1,0)}.items():
+                nx, ny = gx+dx, gy+dy
+                if (nx, ny) == env.pacman_pos:
+                    # move into pacman
+                    self.pos = (nx, ny)
+                    return dir_name
+
+            # 2) if KB knows a Target, move greedily towards closest target
+            # build list of remembered targets (atoms like Target_x_y)
+            targets = []
+            for fact in list(self.kb.facts):
+                if fact.startswith("Target_"):
+                    _, sx, sy = fact.split("_")
+                    targets.append((int(sx), int(sy)))
+
+            if targets:
+                tx, ty = min(targets, key=lambda c: abs(c[0] - gx) + abs(c[1] - gy))
+                if gy != ty:
+                    if ty > gy and not env.blocked((gx, gy + 1)):  # Move down towards row
+                        self.pos = (gx, gy + 1)
+                        return 'DOWN'
+                    elif ty < gy and not env.blocked((gx, gy - 1)):  # Move up towards row
+                        self.pos = (gx, gy - 1)
+                        return 'UP'
+                    # If vertical blocked, try horizontal (to navigate around obstacles)
+                    elif tx > gx and not env.blocked((gx + 1, gy)):
+                        self.pos = (gx + 1, gy)
+                        return 'RIGHT'
+                    elif tx < gx and not env.blocked((gx - 1, gy)):
+                        self.pos = (gx - 1, gy)
+                        return 'LEFT'
+                else:
+                    # Already in the row: stay here by moving horizontally towards target's x
+                    if tx > gx and not env.blocked((gx + 1, gy)):  # Right
+                        self.pos = (gx + 1, gy)
+                        return 'RIGHT'
+                    elif tx < gx and not env.blocked((gx - 1, gy)):  # Left
+                        self.pos = (gx - 1, gy)
+                        return 'LEFT'
+                    # If horizontal blocked, try vertical (rare, but to avoid getting stuck)
+                    elif ty > gy and not env.blocked((gx, gy + 1)):
+                        self.pos = (gx, gy + 1)
+                        return 'DOWN'
+                    elif ty < gy and not env.blocked((gx, gy - 1)):
+                        self.pos = (gx, gy - 1)
+                        return 'UP'
+
+            dirs = [('UP',(0,-1)),('DOWN',(0,1)),('LEFT',(-1,0)),('RIGHT',(1,0))]
+            random.shuffle(dirs)
+            for name,(dx,dy) in dirs:
+                nx, ny = gx+dx, gy+dy
+                if not env.blocked((nx, ny)):
+                    self.pos = (nx, ny)
+                    return name
+            return 'WAIT'
 
 def generate_maze(
     w: int,
@@ -308,8 +429,10 @@ def generate_maze(
     # Ensure Pac-Man's starting position does not contain a wall
     pacman_start = (0, 0)
     walls.discard(pacman_start)
-    ghost1_start = (10,7)
+    ghost1_start = (10,5)
     walls.discard(ghost1_start)
+    ghost2_start= (14,5)
+    walls.discard(ghost2_start)
 
 
 
@@ -318,7 +441,7 @@ def generate_maze(
     k_pellets = max(1, int(pellet_density * len(free_cells)))
     pellets = set(rng.sample(free_cells, k_pellets)) if k_pellets > 0 else set()
 
-    return walls, pellets, pacman_start, ghost1_start
+    return walls, pellets, pacman_start, ghost1_start, ghost2_start
 
 
 def run_game(
@@ -341,6 +464,7 @@ def run_game(
             break
 
         env.step(action)
+        os.system('cls' if os.name == 'nt' else 'clear')
 
         print(env.render())
         print()
@@ -351,19 +475,22 @@ def run_pacman():
     """Game entry point: create a maze, instantiate the environment, run the game."""
     
     width, height = 20, 20 
-    walls, pellets, pacman_start, ghost1_start = generate_maze(w=width, h=height)
+    walls, pellets, pacman_start, ghost1_start,ghost2_start = generate_maze(w=width, h=height)
 
     env = Environment(
         width, height,
         walls=walls,
         pellets=pellets,
         start_pos=pacman_start,
+        lives=3,
 
 
     )
 
-    kb_ghost = Ghost(start=ghost1_start, sight=6)
+    kb_ghost = Ghost1(start=ghost1_start, sight=6)
+    kb_ghost2 = Ghost2(start=ghost2_start, sight=6)
     env.ghosts.append(kb_ghost)
+    env.ghosts.append(kb_ghost2)
 
 
     run_game(env)
