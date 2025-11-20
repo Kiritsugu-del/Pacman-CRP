@@ -259,14 +259,7 @@ class Ghost1:
                 if env.blocked((nx, ny)):
                     self.kb.add_fact(f"Wall_{nx}_{ny}")
             
-            for other_ghost in env.ghosts:
-                if other_ghost != self:  # Don't check self
-                    for fact in other_ghost.kb.facts:
-                        if fact.startswith("Target_"):
-                            # Adopt the target's rule if not already known
-                            if fact not in self.kb.facts:
-                                self.kb.add_fact(fact)
-                                self.kb.add_rule(fact, [fact.split(" :- ")[0]])  # Simple adoption
+
                         
             self.kb.infer_all()
 
@@ -343,14 +336,6 @@ class Ghost2:
                 nx, ny = gx+dx, gy+dy
                 if env.blocked((nx, ny)):
                     self.kb.add_fact(f"Wall_{nx}_{ny}")
-
-            for other_ghost in env.ghosts:
-                if other_ghost != self: 
-                    for fact in other_ghost.kb.facts:
-                        if fact.startswith("Target_"):
-                            if fact not in self.kb.facts:
-                                self.kb.add_fact(fact)
-                                self.kb.add_rule(fact, [fact.split(" :- ")[0]])  #
 
             self.kb.infer_all()
 
