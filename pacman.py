@@ -109,6 +109,7 @@ class Environment:
         pellets: Set[Coord] = None,
         start_pos: Coord = (0, 0),
         lives: int = 3
+        
 
     ):
         
@@ -149,7 +150,7 @@ class Environment:
             return
 
         self.time += 1
-
+        self.pacman_prev_pos=self.pacman_pos 
         # Move according to the action
         moves = {'RIGHT': (1, 0), 'LEFT': (-1, 0), 'DOWN': (0, 1), 'UP': (0, -1)}
         if action in moves:
@@ -234,75 +235,153 @@ class Ghost1:
         self.pos = start
         self.sight = sight
         self.kb = KB()
-        self.start = start
+        self.start=start
+        self.current_target = None   # <---
+        self.adjacent_counter = 0   # nº de turnos consecutivos adjacente ao Pac-Man
+        self.rest_turns = 0       # nº de turnos restantes que o fantasma está a descansar
+    
+    def _can_see_pacman(self, env: Environment) -> Tuple[bool, int, int]:
+        #print("G:", self.pos, "P:", env.pacman_pos)
+        gx, gy = self.pos
+        px, py = env.pacman_pos
 
-     
-    def perceive_and_update_kb(self, env) -> None:
-        # drop any transient sensors if you want; here we remember seen pacman cells
-            px, py = env.pacman_pos
-            gx, gy = self.pos
+        # visão vertical
+        if px == gx and abs(py - gy) <= self.sight:
+            step = 1 if py > gy else -1
+            y = gy + step
+            while True:
+                if env.blocked((gx, y)):   # parede bloqueia visão
+                    return False, px, py
+                if y == py:
+                    return True, px, py
+                y += step
+
+        # visão horizontal
+        if py == gy and abs(px - gx) <= self.sight:
+            step = 1 if px > gx else -1
+            x = gx + step
+            while True:
+                if env.blocked((x, gy)):
+                    return False, px, py
+                if x == px:
+                    return True, px, py
+                x += step
+
+        return False, px, py
+
+    
+    def _knows_wall(self, x: int, y: int) -> bool:
+        """Verifica se a KB sabe que há uma parede em (x, y)."""
+        return f"Wall_{x}_{y}" in self.kb.facts
+    
+    def perceive_and_update_kb(self, env: Environment) -> None:
+        gx, gy = self.pos
+
+        # 1) PERCEIVE
+        seen, px, py = self._can_see_pacman(env)
+        new_target = (px, py) if seen else None
+
+        arrived = (self.current_target is not None and
+                (gx, gy) == self.current_target)
+
+        # 2) DEFINIR NOVO ESTADO INTERNO
+        if seen:
+            # Caso 1: Viu Pac-Man ➝ atualizar target
+            self.current_target = new_target
+        elif arrived and not seen:
+            # Caso 2: NÃO viu e chegou ao target ➝ esquecer target
+            self.current_target = None
+
+        # 3) ATUALIZAR KB — limpar transitórios e adicionar ESTADO INTERNO atual
+        self.kb.facts = {
+            f for f in self.kb.facts
+            if not (f.startswith("Seen_") or f.startswith("Ghost_") or f.startswith("Target_"))
+        }
+
+        # se há target novo → adiciona factos e regra
+        if self.current_target is not None:
+            tx, ty = self.current_target
+            seen_atom = f"Seen_{tx}_{ty}"
+            target_atom = f"Target_{tx}_{ty}"
+            self.kb.add_fact(seen_atom)
+            self.kb.add_fact(target_atom)
+            self.kb.add_rule(target_atom, [seen_atom])
+
+        # adicionar posição atual do fantasma
+        self.kb.add_fact(f"Ghost_{gx}_{gy}")
+
+        # adicionar paredes conhecidas à volta
+        for dx, dy in [(0,-1),(0,1),(-1,0),(1,0)]:
+            nx, ny = gx + dx, gy + dy
+            if env.in_bounds((nx, ny)) and env.blocked((nx, ny)):
+                self.kb.add_fact(f"Wall_{nx}_{ny}")
+
+        # fazer inferência
+        self.kb.infer_all()
 
 
-            if abs(px - gx) + abs(py - gy) <= self.sight:
-                atom = f"Seen_{px}_{py}"
-                self.kb.add_fact(atom)
-                # keep a rule that maps Seen -> Target (simple memory)
-                self.kb.add_rule(f"Target_{px}_{py}", [atom])
+    def next_action(self, env: Environment) -> str:
+        gx, gy = self.pos
 
-            # always record our current position atom (optional)
-            self.kb.add_fact(f"Ghost_{gx}_{gy}")
-
-            # record local walls so the ghost avoids them
-            moves = {'UP': (0,-1),'DOWN':(0,1),'LEFT':(-1,0),'RIGHT':(1,0)}
-            for d,(dx,dy) in moves.items():
-                nx, ny = gx+dx, gy+dy
-                if env.blocked((nx, ny)):
-                    self.kb.add_fact(f"Wall_{nx}_{ny}")
-            
-
-                        
-            self.kb.infer_all()
-
-    def next_action(self, env) -> str:
-            gx, gy = self.pos
-            # 1) if pacman adjacent -> chase (deterministic)
-            for dir_name, (dx,dy) in {'UP':(0,-1),'DOWN':(0,1),'LEFT':(-1,0),'RIGHT':(1,0)}.items():
-                nx, ny = gx+dx, gy+dy
-                if (nx, ny) == env.pacman_pos:
-                    # move into pacman
-                    self.pos = (nx, ny)
-                    return dir_name
-
-            # 2) if KB knows a Target, move greedily towards closest target
-            # build list of remembered targets (atoms like Target_x_y)
-            targets = []
-            for fact in list(self.kb.facts):
-                if fact.startswith("Target_"):
-                    _, sx, sy = fact.split("_")
-                    targets.append((int(sx), int(sy)))
-            if targets:
-                # choose closest target
-                tx, ty = min(targets, key=lambda c: abs(c[0]-gx)+abs(c[1]-gy))
-                # simple greedy step toward target
-                dx = 1 if tx > gx else (-1 if tx < gx else 0)
-                dy = 1 if ty > gy else (-1 if ty < gy else 0)
-                # prefer horizontal move if both available
-                if dx != 0 and not env.blocked((gx+dx, gy)):
-                    self.pos = (gx+dx, gy)
-                    return 'RIGHT' if dx==1 else 'LEFT'
-                if dy != 0 and not env.blocked((gx, gy+dy)):
-                    self.pos = (gx, gy+dy)
-                    return 'DOWN' if dy==1 else 'UP'
-
-            # 3) fallback random legal move
-            dirs = [('UP',(0,-1)),('DOWN',(0,1)),('LEFT',(-1,0)),('RIGHT',(1,0))]
-            random.shuffle(dirs)
-            for name,(dx,dy) in dirs:
-                nx, ny = gx+dx, gy+dy
-                if not env.blocked((nx, ny)):
-                    self.pos = (nx, ny)
-                    return name
+        # 0.1 LÓGICA DE DESCANSO
+        if self.rest_turns > 0:
+            self.rest_turns -= 1
             return 'WAIT'
+        # 0.2 ATUALIZAÇÃO DO CONTADOR
+        px, py = env.pacman_prev_pos
+        is_adj = (abs(gx - px) + abs(gy - py) == 1)
+        if is_adj:
+            self.adjacent_counter += 1
+        else:
+            self.adjacent_counter = 0
+        # 0.3 CONGELAMENTO
+        if self.adjacent_counter >= 10:
+            self.rest_turns = 2
+            self.adjacent_counter = 0
+            return 'WAIT'
+
+        # 1) se KB conhece alvos (Target_x_y), perseguir o mais próximo
+        targets = []
+        for fact in list(self.kb.facts):
+            if fact.startswith("Target_"):
+                _, sx, sy = fact.split("_")
+                targets.append((int(sx), int(sy)))
+
+        if targets:
+            # escolher target mais próximo
+            tx, ty = min(targets, key=lambda c: abs(c[0] - gx) + abs(c[1] - gy))
+            dx = 1 if tx > gx else (-1 if tx < gx else 0)
+            dy = 1 if ty > gy else (-1 if ty < gy else 0)
+
+            # tentar mover-se para o target usando apenas conhecimento da KB sobre paredes
+            if dx != 0:
+                nx, ny = gx + dx, gy
+                if env.in_bounds((nx, ny)) and not self._knows_wall(nx, ny):
+                    self.pos = (nx, ny)
+                    return 'RIGHT' if dx == 1 else 'LEFT'
+
+            if dy != 0:
+                nx, ny = gx, gy + dy
+                if env.in_bounds((nx, ny)) and not self._knows_wall(nx, ny):
+                    self.pos = (nx, ny)
+                    return 'DOWN' if dy == 1 else 'UP'
+
+        # 3) fallback: movimento aleatório baseado apenas em paredes conhecidas
+        dirs = [
+            ('UP', (0, -1)),
+            ('DOWN', (0, 1)),
+            ('LEFT', (-1, 0)),
+            ('RIGHT', (1, 0))
+        ]
+        random.shuffle(dirs)
+        for name, (dx, dy) in dirs:
+            nx, ny = gx + dx, gy + dy
+            if env.in_bounds((nx, ny)) and not self._knows_wall(nx, ny):
+                self.pos = (nx, ny)
+                return name
+
+        return 'WAIT'
+
     
 class Ghost2:
 
