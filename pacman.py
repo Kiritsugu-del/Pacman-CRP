@@ -1,4 +1,5 @@
 from typing import Tuple, Set, Dict, List
+from fol_components import Constant, Variable, Predicate, LocationBasedPredicate, Moved, NextLikely, unify
 import random
 import os
 import sys
@@ -67,7 +68,42 @@ def get_pressed_key() -> str:
             return None
         except (ImportError, AttributeError):
             return None
+class FOL_KB:
+    def __init__(self,env):
+        self.facts: Set[Predicate] = set()
+        self.env = env
 
+    def add_fact(self, fact: Predicate) -> None:
+        assert fact.is_ground()
+        self.facts.add(fact)
+
+    def infer_next_likely(self,env) -> Set[NextLikely]:
+        """Apply: Moved(Pacman,X,Y,dx,dy) -> NextLikely(X+dx, Y+dy)."""
+        results: Set[NextLikely] = set()
+        X = Variable("X")
+        Y = Variable("Y")
+        DX = Variable("DX")
+        DY = Variable("DY")
+
+        # rule body pattern
+        pattern = Moved(Constant("Pacman"), X, Y, DX, DY)
+
+        for f in list(self.facts):
+            c = unify(pattern, f)
+            if c is None:
+                continue
+            x = c[X].value
+            y = c[Y].value
+            dx = c[DX].value
+            dy = c[DY].value
+            nx, ny = x + dx, y + dy
+            nx, ny = x + dx, y + dy
+            if env.blocked((nx, ny)):
+                continue
+            
+            results.add(NextLikely(Constant(nx), Constant(ny)))
+        return results
+    
 class KB:
     def __init__(self):
         self.facts: Set[str] = set()
@@ -123,6 +159,7 @@ class Environment:
         self.ghosts: List['Ghost1','Ghost2'] = []  
         self.score = 0
         self.lives=lives
+        self.fol_kb = None
 
 
     def in_bounds(self, c: Coord) -> bool:
@@ -142,7 +179,7 @@ class Environment:
             time=self.time,
             finished=self.finished
         )
-
+    
     def step(self, action: str):
         """Advance the environment one step given an action string.
             Supported actions: 'UP', 'DOWN', 'LEFT', 'RIGHT' to move."""
@@ -151,6 +188,19 @@ class Environment:
 
         self.time += 1
         self.pacman_prev_pos=self.pacman_pos 
+
+        #hasattr returns True if obj.attr_name exists, otherwise False (without raising an error).
+        if hasattr(self, "fol_kb") and self.fol_kb is not None:
+            ox, oy = self.pacman_prev_pos
+            nx, ny = self.pacman_pos
+            dx, dy = nx - ox, ny - oy
+            from fol_components import Constant, Moved
+            self.fol_kb.add_fact(
+                Moved(Constant("Pacman"),
+                    Constant(ox), Constant(oy),
+                    Constant(dx), Constant(dy))
+            )
+
         # Move according to the action
         moves = {'RIGHT': (1, 0), 'LEFT': (-1, 0), 'DOWN': (0, 1), 'UP': (0, -1)}
         if action in moves:
@@ -158,6 +208,15 @@ class Environment:
             nx, ny = self.pacman_pos[0] + dx, self.pacman_pos[1] + dy
             if not self.blocked((nx, ny)):
                 self.pacman_pos = (nx, ny)
+            ox, oy = self.pacman_prev_pos
+
+        if (ox, oy) != (nx, ny) and self.fol_kb is not None:
+            dx, dy = nx - ox, ny - oy
+            self.fol_kb.add_fact(
+                Moved(Constant("Pacman"),
+                    Constant(ox), Constant(oy),
+                    Constant(dx), Constant(dy))
+    )
         
         if self.pacman_pos in self.pellets:
             self.pellets.remove(self.pacman_pos)
@@ -476,6 +535,66 @@ class Ghost2:
                     self.pos = (nx, ny)
                     return name
             return 'WAIT'
+    
+class FOLGhost3:
+    Coord = Tuple[int, int]
+
+    def __init__(self, start: Coord,sight: int):
+        self.pos = start
+        self.start = start
+        self.sight = sight
+
+    def perceive_and_update_kb(self, env: Environment) -> None:
+        # This ghost does not add facts itself; it reads env.fol_kb
+        pass
+
+    def next_action(self, env: Environment) -> str:
+        if env.fol_kb is None:
+            return 'WAIT'
+
+        gx, gy = self.pos
+
+        px, py = env.pacman_pos
+        if abs(px - gx) + abs(py - gy) > self.sight:
+                dirs = [('UP', (0, -1)), ('DOWN', (0, 1)), ('LEFT', (-1, 0)), ('RIGHT', (1, 0))]
+                random.shuffle(dirs)  # Randomize order
+                for name, (dx, dy) in dirs:
+                    nx, ny = gx + dx, gy + dy
+                    if not env.blocked((nx, ny)):
+                        self.pos = (nx, ny)
+                        return name
+                # If all directions blocked (rare), wait
+                return 'WAIT'
+
+        # 1) ask KB for predicted next position(s)
+        predicted = env.fol_kb.infer_next_likely(env)
+
+        candidates = []
+        for nl in predicted:
+            x = nl.x.value
+            y = nl.y.value
+            candidates.append((x, y))
+
+
+
+                    
+        # choose nearest visible predicted cell
+        tx, ty = min(candidates, key=lambda c: abs(c[0]-gx) + abs(c[1]-gy))
+        dx = 1 if tx > gx else (-1 if tx < gx else 0)
+        dy = 1 if ty > gy else (-1 if ty < gy else 0)
+
+        if dx != 0:
+            nx, ny = gx + dx, gy
+            if not env.blocked((nx, ny)):
+                self.pos = (nx, ny)
+                return 'RIGHT' if dx == 1 else 'LEFT'
+        if dy != 0:
+            nx, ny = gx, gy + dy
+            if not env.blocked((nx, ny)):
+                self.pos = (nx, ny)
+                return 'DOWN' if dy == 1 else 'UP'
+
+        return 'WAIT'
 
 def generate_maze(
     w: int,
@@ -495,8 +614,11 @@ def generate_maze(
     walls.discard(pacman_start)
     ghost1_start = (10,5)
     walls.discard(ghost1_start)
-    ghost2_start= (14,5)
+    ghost2_start= (14,10)
     walls.discard(ghost2_start)
+    ghost3_start=(8,3)
+    walls.discard(ghost3_start)
+
 
 
 
@@ -505,7 +627,7 @@ def generate_maze(
     k_pellets = max(1, int(pellet_density * len(free_cells)))
     pellets = set(rng.sample(free_cells, k_pellets)) if k_pellets > 0 else set()
 
-    return walls, pellets, pacman_start, ghost1_start, ghost2_start
+    return walls, pellets, pacman_start, ghost1_start, ghost2_start, ghost3_start
 
 
 def run_game(
@@ -539,22 +661,22 @@ def run_pacman():
     """Game entry point: create a maze, instantiate the environment, run the game."""
     
     width, height = 20, 20 
-    walls, pellets, pacman_start, ghost1_start,ghost2_start = generate_maze(w=width, h=height)
-
+    walls, pellets, pacman_start, ghost1_start,ghost2_start,ghost3_start = generate_maze(w=width, h=height)
     env = Environment(
         width, height,
         walls=walls,
         pellets=pellets,
         start_pos=pacman_start,
         lives=3,
-
-
     )
+    env.fol_kb = FOL_KB(env)
 
     kb_ghost = Ghost1(start=ghost1_start, sight=6)
     kb_ghost2 = Ghost2(start=ghost2_start, sight=6)
+    fol_ghost3 = FOLGhost3(start=ghost3_start, sight=6)
     env.ghosts.append(kb_ghost)
     env.ghosts.append(kb_ghost2)
+    env.ghosts.append(fol_ghost3)
 
 
     run_game(env)
